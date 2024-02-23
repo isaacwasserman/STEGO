@@ -10,6 +10,7 @@ from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from train_segmentation import LitUnsupervisedSegmenter, prep_for_plot, get_class_labels
+from multiprocessing import get_context
 
 torch.multiprocessing.set_sharing_strategy('file_system')
 
@@ -49,9 +50,19 @@ def _apply_crf(tup):
     return dense_crf(tup[0], tup[1])
 
 
-def batched_crf(pool, img_tensor, prob_tensor):
-    outputs = pool.map(_apply_crf, zip(img_tensor.detach().cpu(), prob_tensor.detach().cpu()))
-    return torch.cat([torch.from_numpy(arr).unsqueeze(0) for arr in outputs], dim=0)
+# def batched_crf(pool, img_tensor, prob_tensor):
+#     outputs = pool.map(_apply_crf, zip(img_tensor.detach().cpu(), prob_tensor.detach().cpu()))
+#     return torch.cat([torch.from_numpy(arr).unsqueeze(0) for arr in outputs], dim=0)
+
+def batched_crf(img_tensor, prob_tensor):
+    batch_size = list(img_tensor.size())[0]
+    img_tensor_cpu = img_tensor.detach().cpu()
+    prob_tensor_cpu = prob_tensor.detach().cpu()
+    out = []
+    for i in range(batch_size):
+        out_ = dense_crf(img_tensor_cpu[i], prob_tensor_cpu[i])
+        out.append(out_)
+    return torch.cat([torch.from_numpy(arr).unsqueeze(0) for arr in out], dim=0)
 
 
 @hydra.main(config_path="configs", config_name="eval_config.yml")
@@ -105,6 +116,7 @@ def my_app(cfg: DictConfig) -> None:
             # all_good_images = range(250)
             # all_good_images = [61, 60, 49, 44, 13, 70] #Failure cases
             all_good_images = [19, 54, 67, 66, 65, 75, 77, 76, 124]  # Main figure
+            # all_good_images = range(2175)
         elif model.cfg.dataset_name == "cityscapes":
             # all_good_images = range(80)
             # all_good_images = [ 5, 20, 56]
@@ -117,9 +129,16 @@ def my_app(cfg: DictConfig) -> None:
         saved_data = defaultdict(list)
         with Pool(cfg.num_workers + 5) as pool:
             for i, batch in enumerate(tqdm(test_loader)):
+                # if i < 80:
+                #     continue
                 with torch.no_grad():
+                    # stack batch["img"] list into 4d tensor
+                    batch["img"] = torch.stack(batch["img"], dim=0)
+                    # stack batch["label"] list into 3d tensor
+                    batch["label"] = torch.stack(batch["label"], dim=0)
                     img = batch["img"].cuda()
                     label = batch["label"].cuda()
+                    names = batch["name"]
 
                     feats, code1 = par_model(img)
                     feats, code2 = par_model(img.flip(dims=[3]))
@@ -127,15 +146,25 @@ def my_app(cfg: DictConfig) -> None:
 
                     code = F.interpolate(code, label.shape[-2:], mode='bilinear', align_corners=False)
 
+
+
+                    # print("here1")
+
                     linear_probs = torch.log_softmax(model.linear_probe(code), dim=1)
                     cluster_probs = model.cluster_probe(code, 2, log_probs=True)
 
+                    # print("here2")
+
                     if cfg.run_crf:
-                        linear_preds = batched_crf(pool, img, linear_probs).argmax(1).cuda()
-                        cluster_preds = batched_crf(pool, img, cluster_probs).argmax(1).cuda()
+                        # linear_preds = batched_crf(pool, img, linear_probs).argmax(1).cuda()
+                        # cluster_preds = batched_crf(pool, img, cluster_probs).argmax(1).cuda()
+                        linear_preds = batched_crf(img, linear_probs).argmax(1).cuda()
+                        cluster_preds = batched_crf(img, cluster_probs).argmax(1).cuda()
+                        # print("here3a")
                     else:
                         linear_preds = linear_probs.argmax(1)
                         cluster_preds = cluster_probs.argmax(1)
+                        # print("here3b")
 
                     model.test_linear_metrics.update(linear_preds, label)
                     model.test_cluster_metrics.update(cluster_preds, label)
@@ -143,6 +172,13 @@ def my_app(cfg: DictConfig) -> None:
                     if run_picie:
                         picie_preds = picie_cluster_metrics.map_clusters(
                             picie_cluster_probe(par_picie(img), None)[1].argmax(1).cpu())
+                        
+                    for i in range(len(names)):
+                        linear_pred = linear_preds[i].cpu().numpy().astype(np.uint8)
+                        cluster_pred = cluster_preds[i].cpu().numpy().astype(np.uint8)
+                        cmap = model.label_cmap.astype(np.uint8)
+                        plt.imsave(join("../custom_results", "linear", names[i] + ".png"), cmap[linear_pred])
+                        plt.imsave(join("../custom_results", "cluster", names[i] + ".png"), cmap[cluster_pred])
 
                     if i in batch_nums:
                         matching_offsets = batch_offsets[torch.where(batch_nums == i)]

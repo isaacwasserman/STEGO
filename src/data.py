@@ -307,16 +307,18 @@ class Coco(Dataset):
             coarse_label[label == fine] = coarse
         coarse_label[label == -1] = -1
 
+        img_name = image_path.split("/")[-1]
+
         if self.coarse_labels:
             coarser_labels = -torch.ones_like(label)
             for i, c in enumerate(self.cocostuff3_coarse_classes):
                 coarser_labels[coarse_label == c] = i
-            return img, coarser_labels, coarser_labels >= 0
+            return img, coarser_labels, coarser_labels >= 0, img_name
         else:
             if self.exclude_things:
-                return img, coarse_label - self.first_stuff_index, (coarse_label >= self.first_stuff_index)
+                return img, coarse_label - self.first_stuff_index, (coarse_label >= self.first_stuff_index), img_name
             else:
-                return img, coarse_label, coarse_label >= 0
+                return img, coarse_label, coarse_label >= 0, img_name
 
     def __len__(self):
         return len(self.image_files)
@@ -394,7 +396,8 @@ class CroppedDataset(Dataset):
 
         target = target - 1
         mask = target == -1
-        return image, target.squeeze(0), mask
+        img_name = "{}.jpg".format(index)
+        return image, target.squeeze(0), mask, img_name
 
     def __len__(self):
         return self.num_images
@@ -528,7 +531,7 @@ class ContrastiveSegDataset(Dataset):
 
         self._set_seed(seed)
         coord_entries = torch.meshgrid([torch.linspace(-1, 1, pack[0].shape[1]),
-                                        torch.linspace(-1, 1, pack[0].shape[2])])
+                                        torch.linspace(-1, 1, pack[0].shape[2])], indexing="ij")
         coord = torch.cat([t.unsqueeze(0) for t in coord_entries], 0)
 
         if self.extra_transform is not None:
@@ -540,6 +543,7 @@ class ContrastiveSegDataset(Dataset):
             "ind": ind,
             "img": extra_trans(ind, pack[0]),
             "label": extra_trans(ind, pack[1]),
+            "name": pack[3]
         }
 
         if self.pos_images:

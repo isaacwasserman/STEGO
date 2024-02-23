@@ -3,3 +3,4 @@ data/*
 src/.env
 results/predictions/*
 src/iarpa
+saved_models/*
